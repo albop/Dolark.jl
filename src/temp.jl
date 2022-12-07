@@ -7,15 +7,20 @@ using StaticArrays
 """
 Equalizes offer and demand
 # Arguments
-* `dmodel::`:
-* `μ0`: 
-* `x0`:
-* `y0`:
-* `z0`:
+* `dmodel::DModel`: discretized model
+* `μ0`: distribution of the states
+* `x0`: vector of controls
+* `y0`: agregate variable
+* `z0`: exogenous variable at the global level
 # Optional Argument
 * `diff::boolean`: Indicates whether we want to compute differentials
 # Returns
-* `A`: 
+* `A::Vector{Float64}`: difference y_demand-y_offer
+# Optionnaly, returns
+* `R_A_μ::LinearMap`: A derived wrt μ
+* `R_A_x::LinearMap`: A derived wrt x
+* `R_A_y::LinearMap`: A derived wrt y
+* `R_A_z::LinearMap`: A derived wrt z
 """
 function 𝒜(dmodel, μ0, x0, y0::SVector{d, Float64}, z0; diff=false) where d
 
