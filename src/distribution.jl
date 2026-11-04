@@ -28,14 +28,11 @@ function transition_matrix(dmodel::Dolo.DYModel, x::Dolo.GArray)
     J = Int[]
     V = Tf[]
 
-    for (n, (ss, a)) in enumerate(zip(Dolo.enum(grid), x))
-        for (w, S) in Dolo.τ(dmodel, ss, a)
-            j, S_endo = S.loc
-            for (λ, k) in Dolo.trembling__hand(endo_grid, S_endo)
-                push!(I, n)
-                push!(J, _linear_index(n_m, j, k))
-                push!(V, w * λ)
-            end
+    for n in 1:N
+        for (j, k, w) in point_transitions(dmodel, n, x[n], NamedTuple())
+            push!(I, n)
+            push!(J, _linear_index(n_m, j, k))
+            push!(V, w)
         end
     end
 

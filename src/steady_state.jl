@@ -24,9 +24,9 @@ function solve_agent(dmodel::Dolo.DYModel; x0=nothing, tol=1e-10, verbose=false)
         x0 = sol.dr.values
     end
 
-    wksp = Dolo.newton_workspace(dmodel)
+    wksp = Dolo.newton_workspace(dmodel; linsolve=:gmres)
     wksp.x0.data .= x0.data
-    sol = Dolo.newton(dmodel, wksp; tol_ε=tol, verbose=verbose)
+    sol = Dolo.newton(dmodel, wksp; tol_ε=tol, linsolve=:gmres, verbose=verbose)
 
     if !(sol.ε < tol)
         verbose && @warn "Newton failed (ε=$(sol.ε)): falling back on time iteration."
@@ -43,7 +43,7 @@ end
 
 Solves the agent's problem given aggregates `y` (and `z`), computes the ergodic
 distribution and returns the aggregated equilibrium residuals together with the
-intermediate objects:  `(; A, agent, dmodel, sol, x, μ)`.
+intermediate objects:  `(; A, y, agent, dmodel, sol, x, μ)`.
 
 `x0` (a `Dolo.GArray`) can be used to warm-start the agent's solution.
 """
@@ -63,7 +63,7 @@ function excess(model::HModel, y::NamedTuple=calibrated_aggregate(model);
     μ = ergodic_distribution(dmodel, x)
     A = aggregate(model, dmodel, μ, x, y, z)
 
-    return (; A, agent, dmodel, sol, x, μ)
+    return (; A, y, agent, dmodel, sol, x, μ)
 end
 
 excess(model::HModel, y::AbstractVector; kwargs...) = excess(model, _as_namedtuple(model, y); kwargs...)
@@ -74,8 +74,10 @@ _clamp(model::HModel, y::SVector) = clamp.(y, SVector(model.aggregate.min), SVec
 """
     solve_steady_state(model; y0=calibrated, z=calibrated, discretization=Dict(), tol=1e-6, maxit=50, verbose=true)
 
-Solves for the steady-state aggregates with a (damped) Newton method, the
-jacobian being computed by finite differences. Iterates are kept within the
+Solves for the steady-state aggregates with a (damped) Newton method. The
+jacobian is computed exactly, by the implicit function theorem
+(`jacobian=:exact`, see `excess_jacobian`), or by finite differences
+(`jacobian=:fd`). Iterates are kept within the
 bounds of `model.aggregate`.
 
 Returns `(; y, z, A, agent, dmodel, sol, x, μ, iterations)`.
@@ -86,9 +88,12 @@ function solve_steady_state(model::HModel;
         discretization=Dict(),
         tol=1e-6,
         maxit=50,
-        h=1e-5,
+        h=1e-3,
         max_backsteps=10,
+        jacobian=:exact,
         verbose=true)
+
+    jacobian in (:exact, :fd) || error("Unknown jacobian method $jacobian: use :exact or :fd.")
 
     vars = get_aggregate(model)
     n = length(vars)
@@ -107,13 +112,17 @@ function solve_steady_state(model::HModel;
         (ε < tol || it >= maxit) && break
         it += 1
 
-        # jacobian by forward finite differences (warm-started)
-        J = zeros(n, n)
-        for j in 1:n
-            δ = h * max(1.0, abs(y[j]))
-            yj = setindex(y, y[j] + δ, j)
-            rj = excess(model, yj; z=z, discretization=discretization, x0=x0)
-            J[:, j] = (rj.A - res.A) / δ
+        if jacobian == :exact
+            J = excess_jacobian(model, res; z=z)
+        else
+            # forward finite differences (warm-started)
+            J = zeros(n, n)
+            for j in 1:n
+                δ = h * max(1.0, abs(y[j]))
+                yj = setindex(y, y[j] + δ, j)
+                rj = excess(model, yj; z=z, discretization=discretization, x0=x0)
+                J[:, j] = (rj.A - res.A) / δ
+            end
         end
         dy = -(J \ Vector(res.A))
 
