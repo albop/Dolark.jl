@@ -48,9 +48,16 @@ end
 ###
 
 # values of the exogenous states, where variables in `p` are replaced
-@inline function _exo_values(vars::NTuple{k,Symbol}, q::SVector{k}, p::NamedTuple) where k
-    T = promote_type(eltype(q), map(typeof, values(p))...)
-    SVector{k,T}(ntuple(i -> haskey(p, vars[i]) ? convert(T, p[vars[i]]) : convert(T, q[i]), Val(k)))
+# names of the exogenous variables, as a type parameter
+@inline _exo_names(dmodel::Dolo.DYModel{<:Any,<:Any,<:Dolo.MarkovChain{names}}) where names = Val(names)
+@inline _exo_names(dmodel::Dolo.DYModel) = Val(variables(dmodel.model.exogenous))
+@inline _exo_values(vars::NTuple{k,Symbol}, q::SVector{k}, p::NamedTuple) where k = _exo_values(Val(vars), q, p)
+
+# (names are matched at compile time: `haskey` on a NamedTuple of dual numbers allocates)
+@generated function _exo_values(::Val{vars}, q::SVector{k,Tq}, p::NamedTuple{pn,Tp}) where {vars, k, Tq, pn, Tp}
+    T = promote_type(Tq, Tp.parameters...)
+    entries = [v in pn ? :(convert($T, p.$v)) : :(convert($T, q[$i])) for (i, v) in enumerate(vars)]
+    return :(SVector{$k,$T}($(entries...)))
 end
 
 @inline function _endo_part(v::SVector{d}, ::Val{k}) where d where k
@@ -62,25 +69,28 @@ end
     vars = variables(dmodel.model.exogenous)
     ss = Dolo.point(dmodel.grid, n)
     i = ss.loc[1]
-    m = _exo_values(vars, dmodel.dproc.Q[i], p)
+    m = _exo_values(_exo_names(dmodel), dmodel.dproc.Q[i], p)
     s_endo = _endo_part(ss.val, Val(length(vars)))
     T = promote_type(eltype(m), eltype(s_endo))
     return i, QP(ss.loc, SVector{length(ss.val),T}(m..., s_endo...))
 end
 
-# next period's states, for each exogenous node j: (P[i,j], S::QP)
+# number of exogenous nodes, as a type parameter
+_n_nodes(dmodel::Dolo.DYModel) = Val(size(dmodel.dproc.P, 2))
+
+# next period's states, for each exogenous node j: a tuple of (P[i,j], S::QP)
 @inline function _future_states(dmodel::Dolo.DYModel, i::Int, s::QP, x::SVector, p::NamedTuple)
-    vars = variables(dmodel.model.exogenous)
+    _future_states(dmodel, i, s, x, p, _n_nodes(dmodel))
+end
+
+@inline function _future_states(dmodel::Dolo.DYModel, i::Int, s::QP, x::SVector, p::NamedTuple, ::Val{K}) where K
     P = dmodel.dproc.P
     Q = dmodel.dproc.Q
-    return (
-        let
-            M = _exo_values(vars, Q[j], p)
-            S_endo = SVector(Dolo.transition(dmodel.model, s.val, x, M)...)
-            (P[i, j], QP((j, S_endo), SVector(M..., S_endo...)))
-        end
-        for j in 1:size(P, 2)
-    )
+    return ntuple(Val(K)) do j
+        M = _exo_values(_exo_names(dmodel), Q[j], p)
+        S_endo = SVector(Dolo.transition(dmodel.model, s.val, x, M)...)
+        (P[i, j], QP((j, S_endo), SVector(M..., S_endo...)))
+    end
 end
 
 """
@@ -98,7 +108,16 @@ function household_residual(dmodel::Dolo.DYModel, n::Int, x_n::SVector, φ, p::N
     return Dolo.complementarities(dmodel.model, s, x_n, r)
 end
 
-# Lottery on a 1d regular grid: S is split between nodes k and k+1 with weights
+# One-dimensional endogenous grids: uniform `CGrid{1}`, or any 1d grid of Dolo
+# (`Uniform1D`, `LogGrid`, `AssetGrid`, `PowerGrid`, ...) wrapped in a `CartesianGrid{1}`.
+_grid1d(g::Dolo.CGrid{1}) = g
+_grid1d(g::Dolo.CartesianGrid{1}) = g.grids[1]
+_grid1d(g) = error("Only 1d endogenous grids are supported for now (got $(typeof(g))).")
+
+_bounds(g::Dolo.CGrid{1}) = g.ranges[1]
+_bounds(g::Dolo.AGrid1D) = (g[1], g[length(g)], length(g))
+
+# Lottery on a 1d grid: S is split between nodes k and k+1 with weights
 # (1-λ, λ). Outside of the grid, all the mass goes to the closest bound.
 @inline function _lottery(g::Dolo.CGrid{1}, S::Real)
     a, b, ng = g.ranges[1]
@@ -110,21 +129,38 @@ end
     return k + 1, λ
 end
 
+@inline function _lottery(g::Dolo.AGrid1D, S::Real)
+    # cell located from the value; λ keeps the derivative w.r.t. S
+    k, _ = Dolo.locate_cell(g, ForwardDiff.value(S))
+    λ = (S - g[k]) / (g[k+1] - g[k])
+    λ = max(min(λ, one(λ)), zero(λ))
+    return k, λ
+end
+
+"""
+Lotteries from grid point `n`, for controls `x_n` and prices `p`: a tuple with,
+for each future exogenous node `j`, `(j, k, w, λ)` meaning that a mass
+`w (1-λ)` moves to point `(j, k)` of the grid and a mass `w λ` to `(j, k+1)`.
+"""
+@inline function point_lotteries(dmodel::Dolo.DYModel, n::Int, x_n::SVector, p::NamedTuple)
+    endo_grid = _grid1d(dmodel.grid.grids[2])
+    i, s = _state(dmodel, n, p)
+    return map(_future_states(dmodel, i, s, x_n, p)) do (w, S)
+        j, S_endo = S.loc
+        k, λ = _lottery(endo_grid, S_endo[1])
+        (j, k, w, λ)
+    end
+end
+
 """
 Transitions from grid point `n`, for controls `x_n` and prices `p`: a tuple of
 `(j, k, w)` meaning that a mass `w` moves to point (j, k) of the grid, where `j`
 is the exogenous index and `k` the endogenous one.
 """
 function point_transitions(dmodel::Dolo.DYModel, n::Int, x_n::SVector, p::NamedTuple)
-    endo_grid = dmodel.grid.grids[2]
-    i, s = _state(dmodel, n, p)
     return Iterators.flatten(
-        let
-            j, S_endo = S.loc
-            k, λ = _lottery(endo_grid, S_endo[1])
-            ((j, k, w * (1 - λ)), (j, k + 1, w * λ))
-        end
-        for (w, S) in _future_states(dmodel, i, s, x_n, p)
+        ((j, k, w * (1 - λ)), (j, k + 1, w * λ))
+        for (j, k, w, λ) in point_lotteries(dmodel, n, x_n, p)
     )
 end
 
@@ -135,6 +171,22 @@ end
 _current_prices(dmodel::Dolo.DYModel, names) = NamedTuple{names}(map(k -> dmodel.model.calibration[k], names))
 
 """
+    price_derivatives(dmodel, x, φ, names)
+
+`F_p`: derivative of the agent's residuals w.r.t. prices `names` (a GArray of
+`n_x × n_p` matrices).
+"""
+function price_derivatives(dmodel::Dolo.DYModel, x::Dolo.GArray, φ, names::Tuple)
+    _price_derivatives(dmodel, x, Dolo.Linearized(φ), Val(names))
+end
+
+function _price_derivatives(dmodel, x, lφ, ::Val{names}) where names
+    pv = _as_vector(_current_prices(dmodel, names))
+    f(n, u) = household_residual(dmodel, n, x[n], lφ, NamedTuple{names}(Tuple(u)))
+    return Dolo.GArray(dmodel.grid, [ForwardDiff.jacobian(u -> f(n, u), pv) for n in 1:length(x)])
+end
+
+"""
     household_derivatives(dmodel, x, φ, names)
 
 Returns `(; J, L, F_p)` with `J = F_x` (block diagonal, a GArray of matrices),
@@ -142,15 +194,11 @@ Returns `(; J, L, F_p)` with `J = F_x` (block diagonal, a GArray of matrices),
 derivative w.r.t. prices `names`).
 """
 function household_derivatives(dmodel::Dolo.DYModel, x::Dolo.GArray, φ, names::Tuple)
-    p0 = _current_prices(dmodel, names)
-    pv = _as_vector(p0)
-    lφ = Dolo.Linearized(φ)
-    F_p = Dolo.GArray(dmodel.grid, [
-        ForwardDiff.jacobian(u -> household_residual(dmodel, n, x[n], lφ, NamedTuple{names}(Tuple(u))), pv)
-        for n in 1:length(x)
-    ])
+    F_p = price_derivatives(dmodel, x, φ, names)
     J = Dolo.dF_1(dmodel, x, φ)
-    L = Dolo.dF_2(dmodel, x, φ)
+    # as `Dolo.dF_2(dmodel, x, φ)`, with `has_complementarities` (reflection) evaluated once
+    vc = Val(Dolo.has_complementarities(dmodel.model))
+    L = Dolo.LL(dmodel.grid, [Dolo.dF_2_kernel(n, dmodel, x, φ, vc) for n in 1:length(x)], deepcopy(φ))
     return (; J, L, F_p)
 end
 
@@ -183,34 +231,47 @@ Returns `(; Π, Π_x, Π_p)` where `Π` is the transition matrix, and `Π_x`
 w.r.t. `x` (flattened) and prices.
 """
 function distribution_derivatives(dmodel::Dolo.DYModel, x::Dolo.GArray, μ::AbstractVector, names::Tuple)
+    # (sizes and names as type parameters: function barrier)
+    _distribution_derivatives(dmodel, x, μ, Val(names), Val(length(eltype(x.data))), _n_nodes(dmodel))
+end
+
+# lottery weights λ_j at point n, as a function of u = (x_n, p)
+@inline function _lottery_weights(dmodel, n, u::SVector, names::NTuple{n_p,Symbol}, ::Val{n_x}) where {n_p, n_x}
+    x_n = SVector{n_x}(ntuple(l -> u[l], Val(n_x)))
+    p = NamedTuple{names}(ntuple(l -> u[n_x+l], Val(n_p)))
+    return SVector(map(t -> t[4], point_lotteries(dmodel, n, x_n, p)))
+end
+
+function _distribution_derivatives(dmodel, x, μ, ::Val{names}, ::Val{n_x}, ::Val{K}) where {names, n_x, K}
     grid = dmodel.grid
     n_m, n_s = size(grid)
     N = n_m * n_s
-    n_x = length(x[1])
     n_p = length(names)
     p0 = _current_prices(dmodel, names)
     pv = _as_vector(p0)
 
-    Ip, Jp, Vp = Int[], Int[], Float64[]      # Π
-    Ix, Jx, Vx = Int[], Int[], Float64[]      # Π_x
+    Ip = Vector{Int}(undef, 2K * N); Jp = similar(Ip); Vp = Vector{Float64}(undef, 2K * N)
+    Ix = Vector{Int}(undef, 2K * N * n_x); Jx = similar(Ix); Vx = Vector{Float64}(undef, 2K * N * n_x)
     Π_p = zeros(N, n_p)
 
-    for n in 1:N
-        x_n = x[n]
-        targets = [ _linear_index(n_m, j, k) for (j, k, _) in point_transitions(dmodel, n, x_n, p0) ]
-        weights(u) = SVector((w for (_, _, w) in point_transitions(dmodel, n,
-                SVector{n_x}(ntuple(l -> u[l], Val(n_x))),
-                NamedTuple{names}(ntuple(l -> u[n_x+l], Val(n_p))) ))...)
-        u0 = vcat(x_n, pv)
-        w0 = weights(u0)
-        D = ForwardDiff.jacobian(weights, u0)
-        for (r, t) in enumerate(targets)
-            push!(Ip, n); push!(Jp, t); push!(Vp, w0[r])
-            for l in 1:n_x
-                push!(Ix, t); push!(Jx, (n - 1) * n_x + l); push!(Vx, μ[n] * D[r, l])
-            end
-            for l in 1:n_p
-                Π_p[t, l] += μ[n] * D[r, n_x + l]
+    cp = 0
+    cx = 0
+    @inbounds for n in 1:N
+        u0 = vcat(x[n], pv)
+        lot = point_lotteries(dmodel, n, x[n], p0)
+        D = ForwardDiff.jacobian(u -> _lottery_weights(dmodel, n, u, names, Val(n_x)), u0)   # K × (n_x + n_p)
+        for r in 1:K
+            (j, k, w, λ) = lot[r]
+            for (t, ω, sgn) in ((_linear_index(n_m, j, k), w * (1 - λ), -w), (_linear_index(n_m, j, k + 1), w * λ, w))
+                cp += 1
+                Ip[cp] = n; Jp[cp] = t; Vp[cp] = ω
+                for l in 1:n_x
+                    cx += 1
+                    Ix[cx] = t; Jx[cx] = (n - 1) * n_x + l; Vx[cx] = μ[n] * sgn * D[r, l]
+                end
+                for l in 1:n_p
+                    Π_p[t, l] += μ[n] * sgn * D[r, n_x + l]
+                end
             end
         end
     end
@@ -228,37 +289,50 @@ their derivatives w.r.t. the distribution (`n_A × N`), the controls (`n_A × N 
 the prices (`n_A × n_p`) and the aggregates (`n_A × n_y`, current and future).
 """
 function aggregate_derivatives(model::HModel, dmodel::Dolo.DYModel, μ::AbstractVector, x::Dolo.GArray, y::NamedTuple, z::NamedTuple, names::Tuple)
+    _aggregate_derivatives(model, dmodel, μ, x, y, z, Val(names), Val(length(eltype(x.data))))
+end
+
+# individual equilibrium conditions at point n, as a function of u = (x_n, p, y)
+@inline function _equilibrium_u(model, dmodel, n, u::SVector, z, names::NTuple{n_p,Symbol}, yvars::NTuple{n_y,Symbol}, ::Val{n_x}) where {n_p, n_y, n_x}
+    x_n = SVector{n_x}(ntuple(l -> u[l], Val(n_x)))
+    p = NamedTuple{names}(ntuple(l -> u[n_x+l], Val(n_p)))
+    yy = NamedTuple{yvars}(ntuple(l -> u[n_x+n_p+l], Val(n_y)))
+    _, s = _state(dmodel, n, p)
+    equilibrium(model, s.val, x_n, yy, z, yy, z)
+end
+
+function _aggregate_derivatives(model, dmodel, μ, x, y, z, ::Val{names}, ::Val{n_x}) where {names, n_x}
     N = length(x)
-    n_x = length(x[1])
     n_p = length(names)
     yvars = keys(y)
     n_y = length(yvars)
-    p0 = _current_prices(dmodel, names)
-    u0 = vcat(x[1], _as_vector(p0), _as_vector(y))
+    pv = _as_vector(_current_prices(dmodel, names))
+    yv = _as_vector(y)
+    e(n, u) = _equilibrium_u(model, dmodel, n, u, z, names, yvars, Val(n_x))
 
-    function e(n, u)
-        x_n = SVector{n_x}(ntuple(l -> u[l], Val(n_x)))
-        p = NamedTuple{names}(ntuple(l -> u[n_x+l], Val(n_p)))
-        yy = NamedTuple{yvars}(ntuple(l -> u[n_x+n_p+l], Val(n_y)))
-        _, s = _state(dmodel, n, p)
-        equilibrium(model, s.val, x_n, yy, z, yy, z)
-    end
-
-    n_A = length(e(1, u0))
+    n_A = length(e(1, vcat(x[1], pv, yv)))
     A = zeros(n_A)
     A_μ = zeros(n_A, N)
     A_x = zeros(n_A, N * n_x)
     A_p = zeros(n_A, n_p)
     A_y = zeros(n_A, n_y)
-    for n in 1:N
-        u = vcat(x[n], _as_vector(p0), _as_vector(y))
+    @inbounds for n in 1:N
+        u = vcat(x[n], pv, yv)
         en = e(n, u)
         D = ForwardDiff.jacobian(v -> e(n, v), u)
-        A .+= μ[n] .* en
-        A_μ[:, n] .= en
-        A_x[:, (n-1)*n_x+1:n*n_x] .= μ[n] .* D[:, 1:n_x]
-        A_p .+= μ[n] .* D[:, n_x+1:n_x+n_p]
-        A_y .+= μ[n] .* D[:, n_x+n_p+1:end]
+        for a in 1:n_A
+            A[a] += μ[n] * en[a]
+            A_μ[a, n] = en[a]
+            for l in 1:n_x
+                A_x[a, (n-1)*n_x+l] = μ[n] * D[a, l]
+            end
+            for l in 1:n_p
+                A_p[a, l] += μ[n] * D[a, n_x+l]
+            end
+            for l in 1:n_y
+                A_y[a, l] += μ[n] * D[a, n_x+n_p+l]
+            end
+        end
     end
     return (; A, A_μ, A_x, A_p, A_y)
 end
@@ -267,13 +341,9 @@ end
 ### Total derivative
 ###
 
-# solves (I-Π')dμ = r with Σdμ = 0
-function _solve_distribution(Π, r::AbstractVector)
-    N = size(Π, 1)
-    M = sparse(I - Π')
-    M = [M[1:end-1, :]; ones(1, N)]
-    return M \ vcat(r[1:end-1], 0.0)
-end
+# solves (I-Π')dμ = r (all equations but the last one) with Σdμ = 0
+_solve_distribution(D::DistributionSolver, r::AbstractVector) = _solve_mass(D, r, 0.0)
+_solve_distribution(Π::AbstractMatrix, r::AbstractVector) = _solve_distribution(_distribution_factorization(Π), r)
 
 _flatten(x::Dolo.GArray) = collect(reinterpret(eltype(eltype(x.data)), x.data))
 
@@ -284,25 +354,58 @@ Jacobian `dA/dy` of the aggregated equilibrium conditions w.r.t. the aggregates,
 at the point described by `res` (the output of `excess`). Computed exactly, by
 the implicit function theorem.
 """
-function excess_jacobian(model::HModel, res; z::NamedTuple=calibrated_exogenous(model))
+excess_jacobian(model::HModel, res; z::NamedTuple=calibrated_exogenous(model)) =
+    excess_derivatives(model, res; z=z).dA
+
+"""
+    excess_derivatives(model, res; z=calibrated)
+
+Returns `(; dA, dx, factorization)`: the jacobian `dA/dy` (see `excess_jacobian`),
+the derivative of the agent's controls w.r.t. the aggregates (flattened,
+`N n_x × n_y`), which gives a first order prediction of the controls at nearby
+aggregates, and the solver for the agent's sparse jacobian (a `SparseSolver`,
+or `nothing` when not available), which can be reused to solve the agent's
+problem nearby.
+"""
+function excess_derivatives(model::HModel, res; z::NamedTuple=calibrated_exogenous(model))
     (; dmodel, sol, x, μ, y) = res
     φ = sol.dr
     names = price_names(model, y, z)
 
     p_y = projection_jacobian(model, y, z)
-    (; J, L, F_p) = household_derivatives(dmodel, x, φ, names)
-    precondition!(J, L)
-    (; Π, Π_x, Π_p) = distribution_derivatives(dmodel, x, μ, names)
     (; A_μ, A_x, A_p, A_y) = aggregate_derivatives(model, dmodel, μ, x, y, z, names)
+
+    # household: sparse jacobian if available (all derivatives in one pass on
+    # the grid, see `agent_pass`), GMRES on Dolo's operators otherwise
+    sparse_agent = _sparse_jacobian_available(dmodel, φ)
+    Mf = nothing
+    if sparse_agent
+        pass = agent_pass(dmodel, x, names)
+        (; Π, Π_x, Π_p) = distribution_derivatives(pass, μ)
+        F_p = price_derivatives(pass, dmodel.grid)
+        Mf = SparseSolver(jacobian_matrix(pass))
+    else
+        (; Π, Π_x, Π_p) = distribution_derivatives(dmodel, x, μ, names)
+        (; J, L, F_p) = household_derivatives(dmodel, x, φ, names)
+        precondition!(J, L)
+    end
+    # the factorization used for the ergodic distribution, if available
+    Df = hasproperty(res, :Df) ? res.Df : _distribution_factorization(Π)
 
     n_y = length(y)
     dA = zeros(size(A_y, 1), n_y)
+    dx_dy = zeros(length(x) * length(x[1]), n_y)
     for c in 1:n_y
         dp = p_y[:, c]
         b = Dolo.GArray(dmodel.grid, [-(F_p[n] * dp) for n in 1:length(x)])
-        dx = _flatten(solve_household(J, L, b))
-        dμ = _solve_distribution(Π, Π_x * dx + Π_p * dp)
+        if sparse_agent
+            dx = Mf \ _flatten(b)
+        else
+            dx = _flatten(solve_household(J, L, b))
+        end
+        dμ = _solve_distribution(Df, Π_x * dx + Π_p * dp)
         dA[:, c] = A_μ * dμ + A_x * dx + A_p * dp + A_y[:, c]
+        dx_dy[:, c] = dx
     end
-    return dA
+    return (; dA, dx=dx_dy, factorization=Mf)
 end

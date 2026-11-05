@@ -27,7 +27,12 @@ println()
 println("Steady state: K = $K, r = $r, w = $w")
 println("1/β - 1 = $(1/model.agent.calibration.β - 1)")
 
-# Same steady state, solving for (x, μ, K) jointly with Newton-Krylov, where GMRES
-# is preconditioned by the agent's block (with 5 Neumann terms)
-sol_joint = solve_steady_state_joint(model; discretization, agent_steps=5)
-println("Newton-Krylov: K = $(sol_joint.y.K), GMRES iterations: $(sol_joint.gmres_iterations)")
+# Same steady state, solving for (x, μ, K) jointly with Newton's method (exact
+# steps, by block elimination with sparse factorizations)
+sol_joint = solve_steady_state_joint(model; discretization)
+println("Joint Newton: K = $(sol_joint.y.K)")
+
+# ... or with Newton-Krylov, where GMRES is preconditioned by the agent's block
+# (with 5 Neumann terms)
+sol_nk = solve_steady_state_joint(model; discretization, linsolve=:gmres, agent_steps=5)
+println("Newton-Krylov: K = $(sol_nk.y.K), GMRES iterations: $(sol_nk.gmres_iterations)")

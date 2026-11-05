@@ -6,6 +6,7 @@ authors = ["Winant Pablo <pablo.winant@gmail.com>"]
 [deps]
 Dolo = "9d24351c-2990-5e1b-a277-04c4b809c898"
 ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
+IncompleteLU = "40713840-3770-5561-ab4c-a76e7d0d7895"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
@@ -16,6 +17,7 @@ Dolo = {path = "../Dolo.jl"}
 [compat]
 Dolo = "0.5"
 ForwardDiff = "0.10, 1"
+IncompleteLU = "0.2"
 LinearAlgebra = "1"
 SparseArrays = "1"
 StaticArrays = "1"
