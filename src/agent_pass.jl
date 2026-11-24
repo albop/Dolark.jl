@@ -65,8 +65,12 @@ function agent_pass(dmodel::Dolo.DYModel, x::Dolo.GArray, names::Tuple=(); deriv
     return _agent_pass(dmodel, x, Val(names), Val(length(eltype(x.data))), _n_nodes(dmodel), derivatives)
 end
 
-# controls x_n, future controls X_j, given cells (as `Dolo.F`, with linear interpolation)
-@inline function _point_residual(dmodel, i, s_endo, x_n::SVector{n_x}, p::NamedTuple, ΔX, xdata, n_m, nodes, cells,
+# controls x_n, future controls X_j, given cells (as `Dolo.F`, with linear interpolation),
+# with prices p today (in the current state) and pf tomorrow (in the future states)
+@inline _point_residual(dmodel, i, s_endo, x_n::SVector, p::NamedTuple, ΔX, xdata, n_m, nodes, cells, vK::Val) =
+    _point_residual(dmodel, i, s_endo, x_n, p, p, ΔX, xdata, n_m, nodes, cells, vK)
+
+@inline function _point_residual(dmodel, i, s_endo, x_n::SVector{n_x}, p::NamedTuple, pf::NamedTuple, ΔX, xdata, n_m, nodes, cells,
         ::Val{K}) where {n_x, K}
     model = dmodel.model
     P = dmodel.dproc.P
@@ -76,7 +80,7 @@ end
     s = QP((i, s_endo), SVector{length(m) + length(s_endo), T}(m..., s_endo...))
     # (terms are returned by the closure: a variable updated inside it would be boxed)
     terms = ntuple(Val(K)) do j
-        M = _exo_values(_exo_names(dmodel), Q[j], p)
+        M = _exo_values(_exo_names(dmodel), Q[j], pf)
         S_endo = SVector(Dolo.transition(model, s.val, x_n, M)...)
         k = cells[j]
         λ = (S_endo[1] - nodes[k]) / (nodes[k+1] - nodes[k])

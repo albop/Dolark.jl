@@ -61,3 +61,28 @@ println("agent + distribution at fixed prices (cold start): ", ms(t.median))
 
 (; r, w) = projection(model, sol.y, sol.z)
 println("\nr = $r, w = $w (toolkit: r = 0.025369, w = 1.277392, K = 6.819205)")
+
+# linearized dynamics (sequence-space jacobian), TFP shock dZ_0 = 0.01, ρ_Z = 0.9, T = 300
+# (the toolkit's K_t is end-of-period capital, i.e. our K_{t+1})
+T = 300
+lin = linearize(model, sol)
+t_lin = timing(() -> linearize(model, sol))
+t_J = timing(() -> household_jacobians(lin, T))
+J = household_jacobians(lin, T)
+t_G = timing(() -> ge_jacobians(lin, T; J))
+G = ge_jacobians(lin, T; J).G
+t_irf = timing(() -> irf_ssj(lin; T, shock=[0.01], G))
+irf = irf_ssj(lin; T, shock=[0.01], G)
+println("\nlinearize: ", ms(t_lin.median), ", household jacobians: ", ms(t_J.median),
+    " (toolkit: 166 ms), GE jacobian: ", ms(t_G.median), " (toolkit: 12.5 ms), IRF: ",
+    round(1e6 * t_irf.median, digits=1), " µs")
+println("peak dK = ", maximum(irf.y[:, 1]), " (toolkit: 0.057046)")
+
+# Reiter's method with two-sided Krylov reduction (adaptive k), same IRF (the
+# difference, ~2e-8, is the truncation of SSJ at T = 300: 1e-14 against T = 1200)
+solve_reiter(lin; reduction=:krylov)
+t_R = timing(() -> solve_reiter(lin; reduction=:krylov); n=3)
+sR = solve_reiter(lin; reduction=:krylov)
+irf_R = irf_reiter(sR, lin; T, shock=[0.01])
+println("Reiter (Krylov, ", size(sR.X, 1), " variables): ", ms(t_R.median),
+    ", max |IRF - SSJ| / max |IRF| = ", maximum(abs, irf_R.y - irf.y) / maximum(abs, irf.y))

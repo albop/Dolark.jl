@@ -16,6 +16,11 @@ module Dolark
     include("agent_pass.jl")
     include("joint.jl")
     include("egm.jl")
+    include("linearization_types.jl")
+    include("linearization.jl")
+    include("cyclic_reduction.jl")
+    include("reiter.jl")
+    include("ssj.jl")
 
     export HModel, projection, equilibrium
     export agent_model, ergodic_distribution, transition_matrix, aggregate
@@ -24,5 +29,8 @@ module Dolark
     poststates, half_transition, expectation, direct_response_egm, reverse_state, control_bounds,
     half_transition_depends_on_m,
     agent_jacobian, newton_sparse, agent_pass
+
+    export Linearization, IRF
+    # (exports for linearize / Reiter / SSJ are added in their own files)
 
 end # module

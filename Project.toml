@@ -4,6 +4,7 @@ version = "0.2.0-alpha"
 authors = ["Winant Pablo <pablo.winant@gmail.com>"]
 
 [deps]
+ArnoldiMethod = "ec485272-7323-5ecc-a04f-4719b315124d"
 Dolo = "9d24351c-2990-5e1b-a277-04c4b809c898"
 ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
 IncompleteLU = "40713840-3770-5561-ab4c-a76e7d0d7895"
@@ -15,6 +16,7 @@ StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Dolo = {path = "../Dolo.jl"}
 
 [compat]
+ArnoldiMethod = "0.4.0"
 Dolo = "0.5"
 ForwardDiff = "0.10, 1"
 IncompleteLU = "0.2"
@@ -24,7 +26,8 @@ StaticArrays = "1"
 julia = "1.11"
 
 [extras]
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Test"]
+test = ["Random", "Test"]

@@ -157,10 +157,11 @@ function projection(model::HModel{:ayiagari}, y::NamedTuple, z::NamedTuple)
     (; r, w)
 end
 
-# capital market clearing: aggregate savings equal capital
+# capital market clearing: savings at t are the capital used at t+1
+# (K is predetermined: K_{t+1} = ∫ a_t dμ_t, and r_t, w_t depend on K_t)
 function equilibrium(model::HModel{:ayiagari}, s::NamedTuple, x::NamedTuple, y::NamedTuple, z::NamedTuple, Y::NamedTuple, Z::NamedTuple)
     a = s.y - x.c    # savings
-    (a - y.K,)
+    (a - Y.K,)
 end
 
 ayiagari_model()

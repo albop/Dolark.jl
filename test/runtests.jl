@@ -342,3 +342,6 @@ end
         @test D._distribution_matrix(p, 0) ≈ D._distribution_matrix(sparse(Π0), 0)
     end
 end
+
+include("test_reiter.jl")
+include("test_ssj.jl")
