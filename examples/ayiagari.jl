@@ -12,6 +12,7 @@ import Dolo: transition, arbitrage, complementarities, initial_guess
 import Dolark
 using Dolark: HModel
 import Dolark: projection, equilibrium
+import Dolark: poststates, half_transition, expectation, direct_response_egm, reverse_state, control_bounds
 
 """
     ayiagari_model(; kwargs...)
@@ -109,6 +110,40 @@ function complementarities(model::AgentType, s::NamedTuple, x::NamedTuple, Fv::S
 end
 
 initial_guess(model::AgentType, s::NamedTuple) = (; c = 0.9*s.y)
+
+# Endogenous grid method (as `examples/models/consumption_savings_iid.yaml` in dolo.py),
+# with post-decision state a = y - c (savings).
+
+poststates(model::AgentType) = CartesianSpace(; a=(0.0, model.states.endo.max[1]))
+
+function half_transition(model::AgentType, m::NamedTuple, a::NamedTuple, M::NamedTuple)
+    y = exp(M.e)*M.w + a.a*(1 + M.r)
+    (; y)
+end
+
+# y' does not depend on the current exogenous state (faster EGM)
+Dolark.half_transition_depends_on_m(::AgentType) = false
+
+# c̄ = 1 normalizes marginal utility (expectation and direct response must agree)
+function expectation(model::AgentType, M::NamedTuple, S::NamedTuple, X::NamedTuple)
+    (; β, γ) = model.calibration
+    mr = β*X.c^(-γ)*(1 + M.r)
+    (; mr)
+end
+
+function direct_response_egm(model::AgentType, m::NamedTuple, a::NamedTuple, z::NamedTuple)
+    (; γ) = model.calibration
+    c = z.mr^(-1/γ)
+    (; c)
+end
+
+function reverse_state(model::AgentType, m::NamedTuple, a::NamedTuple, x::NamedTuple)
+    y = a.a + x.c
+    (; y)
+end
+
+# 0 <= c <= y
+control_bounds(model::AgentType, s::NamedTuple) = ((; c=0.0), (; c=s.y))
 
 # the agent's problem is solved first by the endogenous grid method, then on Dolo's grid
 Dolark.cold_start(model::AgentType, dmodel) = Dolark.egm(dmodel)

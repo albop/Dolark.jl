@@ -168,6 +168,43 @@ end
     @test gap[end÷2] < 1e-2
 end
 
+@testset "Generic EGM" begin
+    D = Dolark
+    d = Dict(:endo => Dict(:n => 100))
+    dm = Dolo.discretize(agent_model(model, (; K=20.0)), d)
+    r = egm(dm; details=true, tol=1e-10, a_grid=D._poststate_grid(poststates(dm.model), 300))
+    @test r isa EGMResult
+    @test r.converged
+    @test all(issorted, eachcol(r.s_grid))
+    # on the endogenous grid, the Euler equation holds where the constraint does
+    # not bind: residuals of Dolo's arbitrage equations at the EGM solution
+    φ = D._decision_rule(dm, r.x)
+    res = D._flatten(Dolo.F(dm, r.x, φ))
+    @test sort(abs.(res))[end÷2] < 1e-4
+    # close to the solution on Dolo's grid (up to the interpolation error of
+    # the latter, with a uniform step of 1 in cash on hand)
+    s = solve_agent(dm)
+    gap = abs.(D._flatten(r.x) - D._flatten(s.dr.values))
+    @test sort(gap)[end÷2] < 2e-3
+    # the generic loop over (m, M) gives the same fixed point as the shortcut
+    # used when the half transition does not depend on m
+    p = D.EGMProblem(dm.model)
+    A = [SVector(a) for a in r.a_grid]
+    Q = dm.dproc.Q; P = Matrix(dm.dproc.P)
+    Z1 = fill(zero(SVector{1,Float64}), length(A), length(Q))
+    H = similar(Z1)
+    D._egm_expectations_indep!(p, Z1, H, r.s_grid, r.x_grid, A, Q, P)
+    Z2 = similar(Z1)
+    for i in eachindex(Q)
+        D._egm_expectations!(p, Z2, i, i, r.s_grid, r.x_grid, A, Q, P)
+    end
+    @test maximum(maximum.(abs, Z1 - Z2)) < 1e-12
+    # a fixed point: one more iteration does not change the endogenous grid
+    hn = Val((:mr,))
+    x1 = [D._direct_response(p, Q[i], A[l], D._nt(hn, Z2[l, i])) for l in eachindex(A), i in eachindex(Q)]
+    @test maximum(maximum.(abs, x1 - r.x_grid)) < 1e-9
+end
+
 @testset "Non-uniform grid" begin
     D = Dolark
     d = Dict(:endo => Dict(:y => Dolo.LogGrid(60; pivot=0.25)))

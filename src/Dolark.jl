@@ -20,6 +20,9 @@ module Dolark
     export HModel, projection, equilibrium
     export agent_model, ergodic_distribution, transition_matrix, aggregate
     export excess, solve_agent, solve_steady_state, excess_jacobian, solve_steady_state_joint
-    export egm, cold_start, agent_jacobian, newton_sparse, agent_pass
+    export egm, EGMResult, cold_start,
+    poststates, half_transition, expectation, direct_response_egm, reverse_state, control_bounds,
+    half_transition_depends_on_m,
+    agent_jacobian, newton_sparse, agent_pass
 
 end # module
